@@ -100,7 +100,7 @@ async function handleModels (apiKey) {
 }
 
 const DEFAULT_EMBEDDINGS_MODEL = "text-embedding-004";
-const DEFAULT_IMAGE_MODEL = "gemini-1.5-flash-preview-image-generation"; // или другая актуальная модель для изображений
+const DEFAULT_IMAGE_MODEL = "imagen-3.0-generate-002"; // ИЗМЕНЕНО на Imagen 3
 
 async function handleEmbeddings (req, apiKey) {
   if (typeof req.model !== "string") {
