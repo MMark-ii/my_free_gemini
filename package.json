@@ -1,6 +1,7 @@
 {
   "dependencies": {
-    "@whatwg-node/server": "0.9"
+    "@whatwg-node/server": "0.9",
+    "@google/generative-ai": "^0.15.0"
   },
   "devDependencies": {
     "nodemon": "3"
