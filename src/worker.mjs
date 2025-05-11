@@ -100,7 +100,7 @@ async function handleModels (apiKey) {
 }
 
 const DEFAULT_EMBEDDINGS_MODEL = "text-embedding-004";
-const DEFAULT_IMAGE_MODEL = "gemini-1.5-flash-latest"; // Меняем на Flash-модель
+const DEFAULT_IMAGE_MODEL = "gemini-2.0-flash-preview-image-generation"; // ИСПОЛЬЗУЕМ МОДЕЛЬ ИЗ ДОКУМЕНТАЦИИ
 
 async function handleEmbeddings (req, apiKey) {
   if (typeof req.model !== "string") {
@@ -308,11 +308,13 @@ async function handleImageGeneration(req, apiKey) {
   // Структура запроса для Gemini API (для :generateContent)
   const geminiPayload = {
     contents: [{
-      parts: [{ text: prompt }]
+      parts: [
+        { text: prompt }
+      ]
     }],
     generationConfig: {
       candidateCount: n,
-      response_mime_type: "image/png"
+      response_modalities: ['TEXT', 'IMAGE']
     },
     safetySettings, // Глобально определенные настройки безопасности
   };
