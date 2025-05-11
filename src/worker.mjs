@@ -311,7 +311,8 @@ async function handleImageGeneration(req, apiKey) {
       parts: [{ text: prompt }]
     }],
     generationConfig: {
-      candidateCount: n
+      candidateCount: n,
+      response_mime_type: "image/png"
     },
     safetySettings, // Глобально определенные настройки безопасности
   };
