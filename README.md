@@ -5,7 +5,6 @@ but there are many tools that work exclusively with the OpenAI API.
 
 This project provides a personal OpenAI-compatible endpoint for free.
 
-
 ## Serverless?
 
 Although it runs in the cloud, it does not require server maintenance.
