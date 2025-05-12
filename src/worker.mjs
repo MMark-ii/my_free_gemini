@@ -36,6 +36,10 @@ export default {
           assert(request.method === "POST");
           return handleImageGeneration(await request.json(), apiKey)
             .catch(errHandler);
+        case pathname.endsWith("/images/edits"):
+          assert(request.method === "POST");
+          return handleImageEditing(await request.json(), apiKey)
+            .catch(errHandler);
         default:
           throw new HttpError("404 Not Found", 404);
       }
