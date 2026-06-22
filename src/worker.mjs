@@ -357,7 +357,8 @@ function processCompletionsResponse(body, model, id) {
 }
 
 
-async function handleCompletions (req, apiKey) {
+async function handleCompletions(req, apiKey) {
+  // Определяем модель
   let modelName = DEFAULT_MODEL;
   if (typeof req.model === "string") {
     if (req.model.startsWith("models/")) {
@@ -367,44 +368,255 @@ async function handleCompletions (req, apiKey) {
     }
   }
   
-  let transformedBody = await transformRequest(req);
+  // 🔍 Логируем входящий запрос от клиента
+  console.log("[DEBUG] Original request from client:", JSON.stringify(req, null, 2));
   
+  // Вручную строим тело для Gemini API, игнорируя transformRequest
+  // чтобы гарантированно избежать попадания лишних полей
+  
+  const { messages, temperature, top_p, max_tokens, stop, tools, tool_choice } = req;
+  
+  // 1. Строим contents (сообщения)
+  const contents = [];
+  let systemInstruction = null;
+  
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      // Системное сообщение обрабатываем отдельно
+      const text = typeof msg.content === "string" ? msg.content : 
+                   (Array.isArray(msg.content) ? msg.content.map(p => p.text || "").join("\n") : "");
+      systemInstruction = {
+        parts: [{ text }]
+      };
+      continue;
+    }
+    
+    // Определяем роль для Gemini
+    let role = msg.role;
+    if (role === "assistant") role = "model";
+    if (role === "tool") continue; // Пока пропускаем tool-сообщения
+    
+    // Строим parts
+    let parts = [];
+    
+    if (typeof msg.content === "string") {
+      parts.push({ text: msg.content });
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part.type === "text" && part.text) {
+          parts.push({ text: part.text });
+        } else if (part.type === "image_url" && part.image_url?.url) {
+          const url = part.image_url.url;
+          if (url.startsWith("data:")) {
+            const [header, data] = url.split(",");
+            const mimeType = header.split(":")[1].split(";")[0];
+            parts.push({
+              inlineData: { mimeType, data }
+            });
+          }
+        }
+      }
+    }
+    
+    if (parts.length > 0) {
+      contents.push({ role, parts });
+    }
+  }
+  
+  // 2. Строим generationConfig (параметры генерации)
+  const generationConfig = {};
+  if (temperature !== undefined) generationConfig.temperature = temperature;
+  if (top_p !== undefined) generationConfig.topP = top_p;
+  if (max_tokens !== undefined) generationConfig.maxOutputTokens = max_tokens;
+  if (stop !== undefined) {
+    generationConfig.stopSequences = Array.isArray(stop) ? stop : [stop];
+  }
+  
+  // 3. Строим tools (инструменты) в формате Gemini
+  let geminiTools = null;
+  if (tools && Array.isArray(tools) && tools.length > 0) {
+    const functionDeclarations = [];
+    for (const tool of tools) {
+      if (tool.type === "function" && tool.function) {
+        functionDeclarations.push({
+          name: tool.function.name,
+          description: tool.function.description || "",
+          parameters: tool.function.parameters || { type: "object", properties: {} }
+        });
+      }
+    }
+    if (functionDeclarations.length > 0) {
+      geminiTools = [{ functionDeclarations }];
+    }
+  }
+  
+  // 4. Строим toolConfig (настройки вызова инструментов)
+  let toolConfig = null;
+  if (tool_choice) {
+    let mode = "AUTO";
+    let allowedFunctionNames = null;
+    
+    if (typeof tool_choice === "string") {
+      if (tool_choice === "none") mode = "NONE";
+      else if (tool_choice === "auto") mode = "AUTO";
+      else if (tool_choice === "required") mode = "ANY";
+    } else if (tool_choice && tool_choice.type === "function") {
+      mode = "ANY";
+      allowedFunctionNames = [tool_choice.function.name];
+    }
+    
+    toolConfig = {
+      functionCallingConfig: {
+        mode,
+        ...(allowedFunctionNames && { allowedFunctionNames })
+      }
+    };
+  }
+  
+  // 5. Собираем ФИНАЛЬНОЕ тело строго в формате Gemini API
+  const geminiBody = {};
+  
+  // Всегда добавляем contents
+  geminiBody.contents = contents;
+  
+  // Добавляем опциональные поля только если они не пустые
+  if (systemInstruction) {
+    geminiBody.systemInstruction = systemInstruction;
+  }
+  
+  if (Object.keys(generationConfig).length > 0) {
+    geminiBody.generationConfig = generationConfig;
+  }
+  
+  if (geminiTools) {
+    geminiBody.tools = geminiTools;
+  }
+  
+  if (toolConfig) {
+    geminiBody.toolConfig = toolConfig;
+  }
+  
+  // Добавляем safetySettings если они определены глобально
+  if (typeof safetySettings !== "undefined") {
+    geminiBody.safetySettings = safetySettings;
+  }
+  
+  // 🔍 Логируем что реально отправляем в Gemini
+  console.log("[DEBUG] Final Gemini API request body:", JSON.stringify(geminiBody, null, 2));
+  
+  // Определяем URL и метод
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${modelName}:${TASK}`;
-  if (req.stream) { url += "?alt=sse"; }
-
+  if (req.stream) {
+    url += "?alt=sse";
+  }
+  
+  console.log("[DEBUG] Calling Gemini URL:", url);
+  console.log("[DEBUG] Using model:", modelName);
+  
+  // Отправляем запрос в Gemini
   const response = await fetch(url, {
     method: "POST",
     headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
-    body: JSON.stringify(transformedBody),
+    body: JSON.stringify(geminiBody),
   });
-
-  let responseBody = response.body;
-  if (response.ok) {
-    if (req.stream) {
-      // Streaming logic would go here, taken from original project.
-      // For now, let's return an error for streaming as it's complex.
-      // This part needs to be implemented properly if streaming is required.
-      console.warn("Streaming for chat completions is not fully implemented in this version.");
-      throw new HttpError("Streaming not fully implemented", 501);
-
-    } else {
-      const jsonBody = await response.json();
-      if (!jsonBody.candidates || !jsonBody.candidates[0].content) {
-         console.error("Invalid completion object from Gemini:", jsonBody);
-         throw new Error("Invalid completion object from Gemini");
-      }
-      const id = "chatcmpl-" + generateId();
-      responseBody = processCompletionsResponse(jsonBody, modelName, id);
-      return new Response(JSON.stringify(responseBody), fixCors(response));
-    }
-  } else {
-     const errorText = await response.text();
-     console.error(`Gemini API Error for completions: ${errorText}`);
-     throw new HttpError(`Error from Gemini API: ${response.statusText} - ${errorText}`, response.status);
+  
+  // Обрабатываем ответ
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error("[ERROR] Gemini API error:", response.status, errorText);
+    console.error("[ERROR] Request body was:", JSON.stringify(geminiBody, null, 2));
+    throw new HttpError(`Error from Gemini API: ${response.status} - ${errorText}`, response.status);
   }
-   // Fallback for stream, though ideally handled above
-  return new Response(responseBody, fixCors(response));
+  
+  if (req.stream) {
+    // Для стриминга пока не реализовано
+    console.warn("[WARN] Streaming requested but not fully implemented");
+    throw new HttpError("Streaming not fully implemented yet", 501);
+  }
+  
+  // Обрабатываем обычный ответ
+  const jsonResponse = await response.json();
+  console.log("[DEBUG] Gemini response:", JSON.stringify(jsonResponse, null, 2));
+  
+  if (!jsonResponse.candidates || !jsonResponse.candidates[0]?.content?.parts) {
+    console.error("[ERROR] Invalid response structure from Gemini:", jsonResponse);
+    
+    // Проверяем, не заблокирован ли ответ
+    if (jsonResponse.promptFeedback?.blockReason) {
+      throw new HttpError(
+        `Content blocked by safety filters: ${jsonResponse.promptFeedback.blockReason}`,
+        400
+      );
+    }
+    
+    throw new HttpError("Invalid response from Gemini API", 502);
+  }
+  
+  // Формируем ответ в формате OpenAI
+  const candidate = jsonResponse.candidates[0];
+  const content = candidate.content;
+  
+  // Собираем текст из всех частей
+  const textParts = content.parts
+    .filter(part => part.text)
+    .map(part => part.text);
+  
+  const responseText = textParts.join("");
+  
+  // Проверяем наличие вызовов функций
+  const functionCalls = content.parts
+    .filter(part => part.functionCall)
+    .map(part => ({
+      id: `call_${generateId(24)}`,
+      type: "function",
+      function: {
+        name: part.functionCall.name,
+        arguments: JSON.stringify(part.functionCall.args || {})
+      }
+    }));
+  
+  // Формируем choices
+  const choice = {
+    index: 0,
+    message: {
+      role: "assistant",
+      content: responseText || null,
+    },
+    finish_reason: candidate.finishReason || "stop",
+  };
+  
+  // Добавляем function calls если есть
+  if (functionCalls.length > 0) {
+    choice.message.tool_calls = functionCalls;
+    choice.message.content = null; // Обычно content null при вызове функций
+  }
+  
+  // Подсчитываем использование токенов (если есть в ответе)
+  const usage = jsonResponse.usageMetadata ? {
+    prompt_tokens: jsonResponse.usageMetadata.promptTokenCount || 0,
+    completion_tokens: jsonResponse.usageMetadata.candidatesTokenCount || 0,
+    total_tokens: jsonResponse.usageMetadata.totalTokenCount || 0
+  } : {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0
+  };
+  
+  const openAiResponse = {
+    id: "chatcmpl-" + generateId(),
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: modelName,
+    choices: [choice],
+    usage: usage
+  };
+  
+  console.log("[DEBUG] Final OpenAI-formatted response:", JSON.stringify(openAiResponse, null, 2));
+  
+  return new Response(JSON.stringify(openAiResponse), fixCors({
+    headers: { "Content-Type": "application/json" }
+  }));
 }
 
 
