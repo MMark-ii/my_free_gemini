@@ -190,25 +190,150 @@ const generateId = (length = 29) => {
 // If chat completions are also needed, these functions must be copied from the original project.
 
 async function transformRequest(req) {
-  // Basic transformation, copy more complex logic from original project if needed
-  const { messages, model, ...rest } = req;
-  const contents = messages
-    .filter(msg => msg.role === 'user' || msg.role === 'assistant' || msg.role === 'system')
-    .map(msg => ({
-      role: msg.role === 'assistant' ? 'model' : msg.role, // "assistant" maps to "model" for Gemini
-      parts: [{ text: msg.content }],
-    }));
-  
-  // Handle system instruction if present
-  const systemInstructionMsg = messages.find(msg => msg.role === 'system');
-  const system_instruction = systemInstructionMsg ? { role: 'system', parts: [{ text: systemInstructionMsg.content }] } : undefined;
+  const {
+    messages,
+    model,
+    temperature,
+    top_p,
+    max_tokens,
+    stop,
+    tools,
+    tool_choice,
+    // поля, которые НЕ должны попасть в тело Gemini
+    stream,
+    stream_options,
+    parallel_tool_calls,
+    ...rest // прочие поля, которые не обрабатываем – лучше не передавать
+  } = req;
 
+  // 1. Преобразуем сообщения в содержимое contents
+  const systemMessages = messages.filter(m => m.role === 'system');
+  const otherMessages = messages.filter(m => m.role !== 'system');
 
-  return {
+  // Системная инструкция (только одна, последняя)
+  let system_instruction = undefined;
+  if (systemMessages.length > 0) {
+    const lastSystem = systemMessages[systemMessages.length - 1];
+    if (typeof lastSystem.content === 'string') {
+      system_instruction = {
+        parts: [{ text: lastSystem.content }]
+      };
+    }
+    // Если content – массив, можно взять все текстовые части, но обычно system – строка
+  }
+
+  // Преобразуем остальные сообщения (user, assistant, tool)
+  const contents = [];
+  for (const msg of otherMessages) {
+    const role = msg.role === 'assistant' ? 'model' : msg.role; // assistant -> model
+    // role 'tool' в Gemini отсутствует, обычно результаты функций вставляются как functionResponse части
+    if (role === 'tool') {
+      // Обработка tool-сообщений (результаты вызова функций)
+      // Здесь нужно будет преобразовать в part с functionResponse, но для простоты пока пропустим
+      // или вызовем ошибку, т.к. базовая реализация может не поддерживать tools.
+      // Пока просто пропустим такие сообщения, чтобы не сломать запрос.
+      continue;
+    }
+
+    let parts = [];
+    if (typeof msg.content === 'string') {
+      parts.push({ text: msg.content });
+    } else if (Array.isArray(msg.content)) {
+      // Преобразуем OpenAI-части в Gemini parts
+      for (const part of msg.content) {
+        if (part.type === 'text') {
+          parts.push({ text: part.text });
+        } else if (part.type === 'image_url') {
+          // Извлекаем base64-данные из data URL
+          const url = part.image_url?.url;
+          if (url && url.startsWith('data:')) {
+            const [header, data] = url.split(',');
+            const mimeType = header.split(':')[1].split(';')[0];
+            parts.push({
+              inlineData: {
+                mimeType,
+                data
+              }
+            });
+          }
+          // URL-изображения напрямую не поддерживаются в Gemini inlineData,
+          // потребуется предварительная загрузка и преобразование (пока опустим)
+        }
+        // другие типы (image, audio) можно добавить аналогично при необходимости
+      }
+    }
+    contents.push({ role, parts });
+  }
+
+  // 2. Собираем generationConfig
+  const generationConfig = {};
+  if (temperature !== undefined) generationConfig.temperature = temperature;
+  if (top_p !== undefined) generationConfig.topP = top_p;
+  if (max_tokens !== undefined) {
+    generationConfig.maxOutputTokens = max_tokens;
+  }
+  if (stop !== undefined) {
+    // stop может быть строкой или массивом строк
+    generationConfig.stopSequences = Array.isArray(stop) ? stop : [stop];
+  }
+
+  // 3. Преобразуем tools и tool_choice
+  let toolsGemini = undefined;
+  let toolConfig = undefined;
+
+  if (tools && Array.isArray(tools) && tools.length > 0) {
+    // Gemini ожидает массив объектов Tool, каждый из которых содержит functionDeclarations
+    // Обычно все функции кладут в один Tool
+    const functionDeclarations = [];
+    for (const tool of tools) {
+      if (tool.type === 'function' && tool.function) {
+        const func = tool.function;
+        // Параметры должны быть в формате OpenAPI JSON Schema (parameters)
+        // Убедимся, что есть name, description (необязательно) и parameters
+        functionDeclarations.push({
+          name: func.name,
+          description: func.description || '',
+          parameters: func.parameters, // JSON Schema объекта
+        });
+      }
+    }
+    if (functionDeclarations.length > 0) {
+      toolsGemini = [{ functionDeclarations }];
+    }
+  }
+
+  if (tool_choice) {
+    // Преобразуем OpenAI tool_choice в Gemini ToolConfig
+    // tool_choice может быть "auto", "none", "required" (ANY), или объект { type: "function", function: { name: "..." } }
+    let mode = 'AUTO';
+    let allowedFunctionNames = undefined;
+    if (typeof tool_choice === 'string') {
+      if (tool_choice === 'none') mode = 'NONE';
+      else if (tool_choice === 'auto') mode = 'AUTO';
+      else if (tool_choice === 'required') mode = 'ANY';
+    } else if (tool_choice && tool_choice.type === 'function') {
+      mode = 'ANY';
+      allowedFunctionNames = [tool_choice.function.name];
+    }
+    toolConfig = {
+      functionCallingConfig: {
+        mode,
+        ...(allowedFunctionNames && { allowedFunctionNames })
+      }
+    };
+  }
+
+  // 4. Формируем финальный объект для Gemini
+  const requestBody = {
     contents,
-    system_instruction, // Add system instruction here
-    ...rest // Include other parameters like temperature, maxOutputTokens etc.
+    ...(system_instruction && { systemInstruction: system_instruction }),
+    ...(Object.keys(generationConfig).length > 0 && { generationConfig }),
+    ...(toolsGemini && { tools: toolsGemini }),
+    ...(toolConfig && { toolConfig })
   };
+
+  // Примечание: поля stream, stream_options, parallel_tool_calls намеренно исключены
+  return requestBody;
 }
 
 function processCompletionsResponse(body, model, id) {
