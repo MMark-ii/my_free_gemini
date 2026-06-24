@@ -183,11 +183,26 @@ const generateId = (length = 29) => {
   return id.slice(0, length);
 };
 
+/**
+ * Рекурсивно удаляет поле `additionalProperties` из JSON Schema объекта.
+ * Gemini API не поддерживает это поле в function_declarations.
+ */
+function stripAdditionalProperties(obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) {
+    return obj.map(stripAdditionalProperties);
+  }
+  if (typeof obj === 'object') {
+    const cleaned = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (key === 'additionalProperties') continue; // Пропускаем
+      cleaned[key] = stripAdditionalProperties(value);
+    }
+    return cleaned;
+  }
+  return obj;
+}
 
-// Placeholder for transformRequest, processCompletionsResponse, parseStream, etc.
-// These would need to be defined as in the original openai-gemini project for chat completions to fully work.
-// For simplicity in this example, we'll assume they exist or are not critical for image generation focus.
-// If chat completions are also needed, these functions must be copied from the original project.
 
 async function transformRequest(req) {
   const {
@@ -293,7 +308,7 @@ async function transformRequest(req) {
         functionDeclarations.push({
           name: func.name,
           description: func.description || '',
-          parameters: func.parameters, // JSON Schema объекта
+          parameters: stripAdditionalProperties(func.parameters), // JSON Schema объекта, очищенная от additionalProperties
         });
       }
     }
@@ -441,7 +456,7 @@ async function handleCompletions(req, apiKey) {
         functionDeclarations.push({
           name: tool.function.name,
           description: tool.function.description || "",
-          parameters: tool.function.parameters || { type: "object", properties: {} }
+          parameters: stripAdditionalProperties(tool.function.parameters || { type: "object", properties: {} })
         });
       }
     }
